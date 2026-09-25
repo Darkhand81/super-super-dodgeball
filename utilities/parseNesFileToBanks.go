@@ -1,19 +1,34 @@
 package main
 
 import (
+	"bufio"
+	"crypto/md5"
+	"encoding/hex"
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"os"
+	"path/filepath"
 )
 
-// This utility will take an NES rom as input, and split it up into 4k banks
-// It currently assumes a lot about the game, and is set up to parse the game
-// Super Dodge Ball, a MMC1 game, where banks 8+ are CHR ROM banks and within those banks
+// md5 of the headered Super Dodge Ball (U) rom this port is built against
+const expectedMD5 = "9c819e679f5fab4ef836761d31e98adc"
+
+const (
+	headerSize = 0x10
+	bankSize   = 0x4000
+	// banks 0-7 are PRG ROM, banks 8-15 are CHR ROM
+	firstChrBank = 8
+	chrBankCount = 8
+)
+
+// This utility will take the Super Dodge Ball NES rom as input and generate the
+// chrom-tiles-X.asm files the SNES port needs.  It assumes a lot about the game:
+// Super Dodge Ball is a MMC1 game, where banks 8+ are CHR ROM banks and within those banks
 // banks at memory 1A000 - 1FFFF are data and 8000 - 19FFF are tiles.  It will automatically
 // convert the 2bpp tiles into 4bpp SNES format, but leave the data parts as is.
 //
-// For all banks it'll break up and label every 0x100 bytes, as well as setting a segment directive
+// The NES PRG banks are NOT written out: src/bankX.asm are heavily modified for the
+// port and must not be replaced with the raw NES code.
 //
 // This script also assumes that the file will have a 16 byte header that we skip.
 //
@@ -23,113 +38,126 @@ import (
 //
 // with 16 bytes per line
 func main() {
-	inputFile := flag.String("in", "Super Dodge Ball (U).nes", "input file to split out")
+	inputFile := flag.String("in", "Super Dodge Ball (U).nes", "headered Super Dodge Ball (U) NES rom")
+	outDir := flag.String("out", "../src", "directory to write the chrom-tiles-X.asm files to")
+	skipMD5 := flag.Bool("skip-md5", false, "don't verify the input rom's md5")
+	flag.Parse()
 
-	inputBytes, _ := ioutil.ReadFile(*inputFile)
-	var banks [][]byte
-	var bankSize = 0x4000
+	if err := run(*inputFile, *outDir, *skipMD5); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
+}
+
+func run(inputFile, outDir string, skipMD5 bool) error {
+	inputBytes, err := os.ReadFile(inputFile)
+	if err != nil {
+		return err
+	}
+
+	if !skipMD5 {
+		sum := md5.Sum(inputBytes)
+		if got := hex.EncodeToString(sum[:]); got != expectedMD5 {
+			return fmt.Errorf("%s has md5 %s, expected %s (headered Super Dodge Ball (U)); use -skip-md5 to ignore",
+				inputFile, got, expectedMD5)
+		}
+	}
+
+	expectedSize := headerSize + (firstChrBank+chrBankCount)*bankSize
+	if len(inputBytes) < expectedSize {
+		return fmt.Errorf("%s is %d bytes, expected at least %d", inputFile, len(inputBytes), expectedSize)
+	}
 
 	// remove the header
-	headerLess := inputBytes[0x10:]
+	headerLess := inputBytes[headerSize:]
 
-	for i := 0; i < len(headerLess); i += bankSize {
-		end := i + bankSize
-
-		if end > len(headerLess) {
-			end = len(headerLess)
-		}
-
-		banks = append(banks, headerLess[i:end])
+	var banks [][]byte
+	for i := 0; i+bankSize <= len(headerLess); i += bankSize {
+		banks = append(banks, headerLess[i:i+bankSize])
 	}
 
-	for i := 0; i < 8; i++ {
-		var bankFile, _ = os.Create(fmt.Sprintf("bank%d.asm", i))
-		defer bankFile.Close()
-
-		bankFile.WriteString(fmt.Sprintf(".segment \"PRGA%d\"", i+1))
-		bankFile.WriteString(fmt.Sprintf("; Bank %d\n", i))
-		for byteIndex := 0; byteIndex < len(banks[i]); byteIndex++ {
-			if byteIndex <= 0x1FFFF {
-				if byteIndex%0x100 == 0 {
-					bankFile.WriteString(fmt.Sprintf("\n\n; %04X - bank %d\n", byteIndex+0x8000, i))
-				}
-				if byteIndex%0x10 == 0 {
-					bankFile.WriteString(".byte ")
-				}
-
-				bankFile.WriteString(fmt.Sprintf("$%02X", banks[i][byteIndex]))
-
-				if byteIndex%0x10 == 0x0F {
-					bankFile.WriteString("\n")
-				} else {
-					bankFile.WriteString(", ")
-				}
-			}
-		}
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		return err
 	}
+
 	// CHR banks
 	tileset := 0
-	for i := 8; i < 16; i++ {
-		var bankFile, _ = os.Create(fmt.Sprintf("chrom-tiles-%d.asm", i-8))
-		defer bankFile.Close()
-		bankFile.WriteString(fmt.Sprintf(".segment \"PRGA%X\"\n", i))
-		for byteIndex := 0; byteIndex < len(banks[i]); byteIndex += 0x10 {
-			if byteIndex%0x1000 == 0 {
-				bankFile.WriteString(fmt.Sprintf("chrom_bank_%d_tileset_%d:\n", i-8, tileset))
-				tileset++
-			}
+	for i := firstChrBank; i < firstChrBank+chrBankCount; i++ {
+		path := filepath.Join(outDir, fmt.Sprintf("chrom-tiles-%d.asm", i-firstChrBank))
+		if err := writeChrBank(path, banks[i], i, &tileset); err != nil {
+			return err
+		}
+		fmt.Println("wrote", path)
+	}
 
-			if i < 14 || (byteIndex < 0x2000 && i == 14) {
-				// converts these to SNES expected format
-				bankFile.WriteString(
-					fmt.Sprintf(
-						".byte $%02X, $%02X, $%02X, $%02X, $%02X, $%02X, $%02X, $%02X, $%02X,"+
-							" $%02X, $%02X, $%02X, $%02X, $%02X, $%02X, $%02X\n",
-						banks[i][byteIndex],
-						banks[i][byteIndex+8],
-						banks[i][byteIndex+1],
-						banks[i][byteIndex+1+8],
-						banks[i][byteIndex+2],
-						banks[i][byteIndex+2+8],
-						banks[i][byteIndex+3],
-						banks[i][byteIndex+3+8],
-						banks[i][byteIndex+4],
-						banks[i][byteIndex+4+8],
-						banks[i][byteIndex+5],
-						banks[i][byteIndex+5+8],
-						banks[i][byteIndex+6],
-						banks[i][byteIndex+6+8],
-						banks[i][byteIndex+7],
-						banks[i][byteIndex+7+8],
-					),
-				)
-				bankFile.WriteString(".byte $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00\n")
-			} else {
-				// these are data banks that need to be formatted differently
-				bankFile.WriteString(
-					fmt.Sprintf(
-						".byte $%02X, $00, $%02X, $00, $%02X, $00, $%02X, $00, $%02X, $00, $%02X, $00, $%02X, $00, $%02X, $00\n"+
-							".byte $%02X, $00, $%02X, $00, $%02X, $00, $%02X, $00, $%02X, $00, $%02X, $00, $%02X, $00, $%02X, $00\n",
-						banks[i][byteIndex],
-						banks[i][byteIndex+1],
-						banks[i][byteIndex+2],
-						banks[i][byteIndex+3],
-						banks[i][byteIndex+4],
-						banks[i][byteIndex+5],
-						banks[i][byteIndex+6],
-						banks[i][byteIndex+7],
-						banks[i][byteIndex+8],
-						banks[i][byteIndex+9],
-						banks[i][byteIndex+10],
-						banks[i][byteIndex+11],
-						banks[i][byteIndex+12],
-						banks[i][byteIndex+13],
-						banks[i][byteIndex+14],
-						banks[i][byteIndex+15],
-					),
-				)
-			}
+	return nil
+}
+
+func writeChrBank(path string, bank []byte, i int, tileset *int) error {
+	file, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	w := bufio.NewWriter(file)
+	fmt.Fprintf(w, ".segment \"PRGA%X\"\n", i)
+	for byteIndex := 0; byteIndex < len(bank); byteIndex += 0x10 {
+		if byteIndex%0x1000 == 0 {
+			fmt.Fprintf(w, "chrom_bank_%d_tileset_%d:\n", i-firstChrBank, *tileset)
+			*tileset++
+		}
+
+		if i < 14 || (byteIndex < 0x2000 && i == 14) {
+			// converts these to SNES expected format
+			fmt.Fprintf(w,
+				".byte $%02X, $%02X, $%02X, $%02X, $%02X, $%02X, $%02X, $%02X, $%02X,"+
+					" $%02X, $%02X, $%02X, $%02X, $%02X, $%02X, $%02X\n",
+				bank[byteIndex],
+				bank[byteIndex+8],
+				bank[byteIndex+1],
+				bank[byteIndex+1+8],
+				bank[byteIndex+2],
+				bank[byteIndex+2+8],
+				bank[byteIndex+3],
+				bank[byteIndex+3+8],
+				bank[byteIndex+4],
+				bank[byteIndex+4+8],
+				bank[byteIndex+5],
+				bank[byteIndex+5+8],
+				bank[byteIndex+6],
+				bank[byteIndex+6+8],
+				bank[byteIndex+7],
+				bank[byteIndex+7+8],
+			)
+			w.WriteString(".byte $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00\n")
+		} else {
+			// these are data banks that need to be formatted differently
+			fmt.Fprintf(w,
+				".byte $%02X, $00, $%02X, $00, $%02X, $00, $%02X, $00, $%02X, $00, $%02X, $00, $%02X, $00, $%02X, $00\n"+
+					".byte $%02X, $00, $%02X, $00, $%02X, $00, $%02X, $00, $%02X, $00, $%02X, $00, $%02X, $00, $%02X, $00\n",
+				bank[byteIndex],
+				bank[byteIndex+1],
+				bank[byteIndex+2],
+				bank[byteIndex+3],
+				bank[byteIndex+4],
+				bank[byteIndex+5],
+				bank[byteIndex+6],
+				bank[byteIndex+7],
+				bank[byteIndex+8],
+				bank[byteIndex+9],
+				bank[byteIndex+10],
+				bank[byteIndex+11],
+				bank[byteIndex+12],
+				bank[byteIndex+13],
+				bank[byteIndex+14],
+				bank[byteIndex+15],
+			)
 		}
 	}
 
+	if err := w.Flush(); err != nil {
+		return err
+	}
+	return file.Close()
 }

@@ -1,0 +1,5 @@
+# build output
+out/
+
+# generated from the NES rom by utilities/parseNesFileToBanks.go
+src/chrom-tiles-*.asm

@@ -7,13 +7,15 @@ Revision 1.2:
 
 # Generating the needed files
 
-For copyright reasons I am not supplying any of the CHR ROM bytes.  There's a go script included in the `utilities/` directory that will extract the needed `.asm` files from a headered Super Dodge Ball rom with an md5 hash of `9c819e679f5fab4ef836761d31e98adc`.
+For copyright reasons I am not supplying any of the CHR ROM bytes.  There's a go script included in the `utilities/` directory that will extract the needed `chrom-tiles-X.asm` files from a headered Super Dodge Ball rom with an md5 hash of `9c819e679f5fab4ef836761d31e98adc`.
 
-Simply run:
+`build.sh` runs it for you automatically if the files are missing, reading the rom from `utilities/Super Dodge Ball (U).nes` (or set `NES_ROM=/path/to/rom.nes`).
+
+To run it by hand from the `utilities/` directory:
 
 ` go run parseNesFileToBanks.go -in=Super\ Dodge\ Ball\ \(U\).nes`
 
-And 16 `.asm` files will be generated.  You can ignore the bankx.asm ones.  Copy the 8 `chrom-tiles-X.asm` to the `/src` directory.
+This writes the 8 `chrom-tiles-X.asm` files straight into `/src` (change with `-out=<dir>`).  It deliberately does not generate any `bankX.asm` files: the ones in `/src` are heavily modified for the port and replacing them with the raw NES banks produces a broken rom.
 
 # Building
 
@@ -32,7 +34,7 @@ And 16 `.asm` files will be generated.  You can ignore the bankx.asm ones.  Copy
 ## Structure of the Project
 
 * `bankX.asm` - The NES memory PRG banks, there are 8 of them.  This code is heavily edited/altered for the port  
-* `chrom-tiles-X.asm` - The NES CHR ROM banks, also 8 of them. These are untouched aside from converting them to the SNES tile format that we use.  The go script takes care of that for you.
+* `chrom-tiles-X.asm` - The NES CHR ROM banks, also 8 of them. These are untouched aside from converting them to the SNES tile format that we use.  The go script takes care of that for you, and they're git-ignored.
 * `2a03_xxxxx.asm` - Sound emulation related code
 * `bank-snes.asm` - All the code that runs in the `A0` bank, this is where we put most of our routines and logic that we need that is SNES specific.  Also includes various included asm files:
 
@@ -50,7 +52,7 @@ And 16 `.asm` files will be generated.  You can ignore the bankx.asm ones.  Copy
 
 ## Building
 
-* Update the `build.sh` file with the location of your cc65 install
-* make sure you've extracted and copied the chr rom banks to `/src`
-* run `build.sh`
+* Update the `build.sh` file with the location of your cc65 install (or have `ca65`/`ld65` on your `PATH`)
+* Put your rom at `utilities/Super Dodge Ball (U).nes` or point `NES_ROM` at it (only needed until the chr rom banks have been generated)
+* run `./build.sh`
 * The output will be in `out/`
